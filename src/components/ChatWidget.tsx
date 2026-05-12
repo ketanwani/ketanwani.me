@@ -1,5 +1,6 @@
 "use client";
 import { useState, useRef, useEffect, FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
 
 interface Message {
   role: "user" | "assistant";
@@ -180,13 +181,32 @@ export default function ChatWidget() {
                     className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                   >
                     <div
-                      className={`max-w-[82%] text-sm leading-relaxed px-3.5 py-2.5 rounded-2xl whitespace-pre-wrap break-words ${
+                      className={`max-w-[82%] text-sm leading-relaxed px-3.5 py-2.5 rounded-2xl break-words ${
                         m.role === "user"
-                          ? "bg-cyan-400 text-slate-900 font-medium rounded-br-sm"
+                          ? "bg-cyan-400 text-slate-900 font-medium rounded-br-sm whitespace-pre-wrap"
                           : "bg-slate-800 text-slate-200 rounded-bl-sm"
                       }`}
                     >
-                      {m.content}
+                      {m.role === "assistant" ? (
+                        <ReactMarkdown
+                          components={{
+                            a: ({ href, children }) => (
+                              <a href={href} target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline hover:text-cyan-300 break-all">
+                                {children}
+                              </a>
+                            ),
+                            p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
+                            ul: ({ children }) => <ul className="list-disc list-inside mb-1 space-y-0.5">{children}</ul>,
+                            ol: ({ children }) => <ol className="list-decimal list-inside mb-1 space-y-0.5">{children}</ol>,
+                            strong: ({ children }) => <strong className="font-semibold text-slate-100">{children}</strong>,
+                            code: ({ children }) => <code className="bg-slate-700 px-1 py-0.5 rounded text-xs font-mono">{children}</code>,
+                          }}
+                        >
+                          {m.content}
+                        </ReactMarkdown>
+                      ) : (
+                        m.content
+                      )}
                     </div>
                   </div>
                 ))}
