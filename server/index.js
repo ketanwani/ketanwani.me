@@ -7,6 +7,102 @@ const Anthropic = require('@anthropic-ai/sdk');
 const app = express();
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const CALENDLY_TOKEN = process.env.CALENDLY_API_TOKEN;
+const CALENDLY_EVENT_SLUG = process.env.CALENDLY_EVENT_SLUG || '30min';
+
+// Cache the Calendly event type URI after first lookup
+let _eventTypeUri = null;
+async function getEventTypeUri() {
+  if (_eventTypeUri) return _eventTypeUri;
+  const me = await fetch('https://api.calendly.com/users/me', {
+    headers: { Authorization: `Bearer ${CALENDLY_TOKEN}` },
+  }).then((r) => r.json());
+
+  const events = await fetch(
+    `https://api.calendly.com/event_types?user=${encodeURIComponent(me.resource.uri)}&active=true`,
+    { headers: { Authorization: `Bearer ${CALENDLY_TOKEN}` } }
+  ).then((r) => r.json());
+
+  const et =
+    events.collection.find((e) => e.slug === CALENDLY_EVENT_SLUG) ||
+    events.collection[0];
+  _eventTypeUri = et?.uri;
+  return _eventTypeUri;
+}
+
+async function executeTool(name, input) {
+  if (name === 'get_available_slots') {
+    try {
+      const uri = await getEventTypeUri();
+      const start = input.date ? new Date(input.date) : new Date();
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+
+      const data = await fetch(
+        `https://api.calendly.com/event_type_available_times?event_type=${encodeURIComponent(uri)}&start_time=${start.toISOString()}&end_time=${end.toISOString()}`,
+        { headers: { Authorization: `Bearer ${CALENDLY_TOKEN}` } }
+      ).then((r) => r.json());
+
+      const slots = (data.collection || []).slice(0, 8).map((s) => ({
+        start: s.start_time,
+        formatted: new Date(s.start_time).toLocaleString('en-SG', {
+          timeZone: 'Asia/Singapore',
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        }),
+      }));
+
+      return { slots, timezone: 'Singapore Time (SGT)' };
+    } catch (err) {
+      return { error: 'Could not fetch availability. Suggest the direct Calendly link instead.' };
+    }
+  }
+
+  if (name === 'create_booking_link') {
+    const params = new URLSearchParams();
+    if (input.name) params.set('name', input.name);
+    if (input.email) params.set('email', input.email);
+    const url = `https://calendly.com/ketan-wa/30min?${params.toString()}`;
+    return { url };
+  }
+
+  return { error: `Unknown tool: ${name}` };
+}
+
+const TOOLS = CALENDLY_TOKEN
+  ? [
+      {
+        name: 'get_available_slots',
+        description:
+          "Fetch real available meeting slots from Ketan's Calendly calendar. Call this when a user wants to schedule a meeting and asks about availability.",
+        input_schema: {
+          type: 'object',
+          properties: {
+            date: {
+              type: 'string',
+              description:
+                'Start date in YYYY-MM-DD format to check availability from. Defaults to today if not provided.',
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'create_booking_link',
+        description:
+          "Generate a pre-filled Calendly booking link personalised with the user's name and email. Call this once you have collected their details.",
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: "User's full name" },
+            email: { type: 'string', description: "User's email address" },
+          },
+          required: [],
+        },
+      },
+    ]
+  : [];
+
 const SYSTEM_PROMPT = `You are the personal AI assistant on Ketan Wani's website (ketanwani.me). You help visitors learn about Ketan's background, experience, and expertise, and you help them book a meeting if they're interested.
 
 Be friendly, concise, and professional. Answer only based on the information below. If asked something you don't know, say so and suggest reaching out directly.
@@ -85,19 +181,24 @@ B.E. Computer Engineering, Birla Vishwakarma Mahavidyalaya (2003–2007)
 
 ## Booking a Meeting
 
-If someone wants to talk to Ketan, discuss opportunities, or learn more, direct them to book a 30-minute call:
-Calendly link: https://calendly.com/ketan-wa/30min
+If someone wants to talk to Ketan, discuss opportunities, or learn more, help them book a 30-minute call using this flow:
+1. Use the get_available_slots tool to show real availability in Singapore time
+2. Ask for the user's name and email address
+3. Use the create_booking_link tool to generate a personalised link
+4. Present the link in markdown format so it is clickable, e.g. [Book your slot here](url)
+
+If the Calendly tools are unavailable, share the direct link: https://calendly.com/ketan-wa/30min
 
 ---
 
 ## Guidelines
 
-- You ONLY answer questions about Ketan Wani — his career, skills, experience, projects, awards, education, and how to contact or meet him.
+- You ONLY answer questions about Ketan Wani — his career, skills, experience, projects, and how to contact or meet him.
 - If a question is not specifically about Ketan Wani, do NOT answer it. Politely decline and say you can only help with questions about Ketan. For example: "I'm only able to answer questions about Ketan Wani. Feel free to ask about his experience, skills, or how to book a call with him!"
 - Do not answer general knowledge questions, current events, or topics unrelated to Ketan — even if you could relate the answer back to him. Redirect immediately.
 - Speak as Ketan's assistant, not as Ketan himself.
 - Keep answers concise (2-4 sentences unless more detail is genuinely needed).
-- If someone asks to book a meeting or wants to connect, always share the Calendly link: https://calendly.com/ketan-wa/30min
+- Always format URLs as markdown links so they are clickable, e.g. [Calendly](https://calendly.com/ketan-wa/30min).
 - Don't invent information not listed above.
 - Be warm and encouraging — visitors are potential collaborators, employers, or interesting connections.`;
 
@@ -105,7 +206,6 @@ app.set('trust proxy', 1);
 
 app.use(cors({
   origin: (origin, cb) => {
-    // Allow any localhost port in dev, and the production domain
     if (!origin || origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:') || origin === 'https://ketanwani.me') {
       return cb(null, true);
     }
@@ -144,21 +244,50 @@ app.post('/api/chat', limiter, async (req, res) => {
   res.flushHeaders();
 
   try {
-    const stream = client.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: safe,
-    });
+    let currentMessages = safe;
 
-    for await (const event of stream) {
-      if (
-        event.type === 'content_block_delta' &&
-        event.delta.type === 'text_delta' &&
-        event.delta.text
-      ) {
-        res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+    for (let iteration = 0; iteration < 5; iteration++) {
+      const streamOptions = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system: SYSTEM_PROMPT,
+        messages: currentMessages,
+      };
+      if (TOOLS.length > 0) streamOptions.tools = TOOLS;
+
+      const stream = client.messages.stream(streamOptions);
+
+      for await (const event of stream) {
+        if (
+          event.type === 'content_block_delta' &&
+          event.delta.type === 'text_delta' &&
+          event.delta.text
+        ) {
+          res.write(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`);
+        }
       }
+
+      const finalMsg = await stream.finalMessage();
+      if (finalMsg.stop_reason !== 'tool_use') break;
+
+      // Execute all tool calls and collect results
+      const toolResults = [];
+      for (const block of finalMsg.content) {
+        if (block.type === 'tool_use') {
+          const result = await executeTool(block.name, block.input);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(result),
+          });
+        }
+      }
+
+      currentMessages = [
+        ...currentMessages,
+        { role: 'assistant', content: finalMsg.content },
+        { role: 'user', content: toolResults },
+      ];
     }
 
     res.write('data: [DONE]\n\n');

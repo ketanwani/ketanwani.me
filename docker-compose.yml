@@ -5,6 +5,8 @@ services:
       - "3002"
     environment:
       - PORT=3002
+      - CALENDLY_API_TOKEN=${CALENDLY_API_TOKEN}
+      - CALENDLY_EVENT_SLUG=${CALENDLY_EVENT_SLUG:-30min}
     env_file:
       - ./server/.env
     restart: unless-stopped
